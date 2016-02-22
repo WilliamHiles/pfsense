@@ -175,6 +175,9 @@ function services_radvd_configure($blacklist = array()) {
 			$radvdconf .= "\tAdvLinkMTU {$mtu};\n";
 		else
 			$radvdconf .= "\tAdvLinkMTU 1280;\n";
+		if (isset($dhcpv6ifconf['radisabledefaultroute'])) {
+			$radvdconf .= "\tAdvDefaultLifetime 0;\n";
+		}
 
 		switch($dhcpv6ifconf['rapriority']) {
 			case "low":
@@ -275,9 +278,11 @@ function services_radvd_configure($blacklist = array()) {
 			}
 		}
 		//2.3
-		$radvdconf .= "\troute ::/0 {\n";
-		$radvdconf .= "\t\tRemoveRoute on;\n";
-		$radvdconf .= "\t};\n";
+		if (!isset($dhcpv6ifconf['radisabledefaultroute'])) {
+			$radvdconf .= "\troute ::/0 {\n";
+			$radvdconf .= "\t\tRemoveRoute on;\n";
+			$radvdconf .= "\t};\n";
+		}
 
 		/* add DNS servers */
 		$dnslist = array();

@@ -99,6 +99,7 @@ if (is_array($config['dhcpdv6'][$if])) {
 	$pconfig['radomainsearchlist'] = $config['dhcpdv6'][$if]['radomainsearchlist'];
 	list($pconfig['radns1'],$pconfig['radns2'],$pconfig['radns3'],$pconfig['radns4']) = $config['dhcpdv6'][$if]['radnsserver'];
 	$pconfig['rasamednsasdhcp6'] = isset($config['dhcpdv6'][$if]['rasamednsasdhcp6']);
+	$pconfig['radisabledefaultroute'] = isset($config['dhcpdv6'][$if]['radisabledefaultroute']);
 
 	$pconfig['subnets'] = $config['dhcpdv6'][$if]['subnets']['item'];
 }
@@ -179,6 +180,7 @@ if ($_POST) {
 			$config['dhcpdv6'][$if]['radnsserver'][] = $_POST['radns4'];
 
 		$config['dhcpdv6'][$if]['rasamednsasdhcp6'] = ($_POST['rasamednsasdhcp6']) ? true : false;
+		$config['dhcpdv6'][$if]['radisabledefaultroute'] = ($_POST['radisabledefaultroute']) ? true : false;
 
 		if (count($pconfig['subnets'])) {
 			$config['dhcpdv6'][$if]['subnets']['item'] = $pconfig['subnets'];
@@ -317,6 +319,14 @@ display_top_tabs($tab_array);
 			</tr>
 			<?php } ?>
 
+			<tr>
+			<td width="22%" valign="top" class="vncell"><?=gettext("Disable Default Route");?></td>
+			<td width="78%" class="vtable">
+				<input id="radisabledefaultroute" name="radisabledefaultroute" type="checkbox" value="yes" <?php if ($pconfig['radisabledefaultroute']) { echo "checked='checked'"; } ?> />
+				<strong><?=gettext("Disable advertising as the default route.");?></strong>
+				<?= gettext("By default the Router Advertisement (RA) Daemon broadcasts as the default route for this interface.  By checking this box the RA Daemon will not broadcast as a default route."); ?>
+			</td>
+			</tr>
 			<tr>
 			<td width="22%" valign="top" class="vncell"><?=gettext("RA Subnet(s)");?></td>
 			<td width="78%" class="vtable">
