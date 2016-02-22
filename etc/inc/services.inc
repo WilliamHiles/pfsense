@@ -41,7 +41,43 @@
 define('DYNDNS_PROVIDER_VALUES', 'citynetwork cloudflare custom custom-v6 dnsexit dnsomatic dyndns dyndns-custom dyndns-static dyns easydns eurodns freedns gratisdns he-net he-net-v6 he-net-tunnelbroker loopia namecheap noip noip-free ods opendns ovh-dynhost route53 selfhost zoneedit');
 define('DYNDNS_PROVIDER_DESCRIPTIONS', 'City Network,CloudFlare,Custom,Custom (v6),DNSexit,DNS-O-Matic,DynDNS (dynamic),DynDNS (custom),DynDNS (static),DyNS,easyDNS,Euro Dns,freeDNS,GratisDNS,HE.net,HE.net (v6),HE.net Tunnelbroker,Loopia,Namecheap,No-IP,No-IP (free),ODS.org,OpenDNS,OVH DynHOST,Route 53,SelfHost,ZoneEdit');
 
+/* find first real ip address on interface. ignore link-local and ipalias. may not exist with a tracked interface */
+function services_get_real_ipv6_ip($realif) {
+	global $config, $g;
+
+	$ifnet = "";
+	$vips = get_configured_ip_aliases_list(true);
+	foreach(pfSense_getall_interface_addresses($realif) as $ipinfo) {
+		if ((is_ipaddrv6($ipinfo) || is_subnetv6($ipinfo)) && (!is_linklocal($ipinfo))) {
+			foreach ($vips as $vip) {
+				if ($vip['mode'] === "ipalias"  && is_ipaddrv6($vip['subnet']) && get_real_interface($vip['interface'], "inet6") === $realif) {
+					if(Net_IPv6::isInNetmask($vip['subnet'], $ipinfo, 128)) {
+						continue 2;
+					}
+				}
+			}
+			$ifnet = $ipinfo;
+			break;
+		}
+	}
+	list($ifcfgipv6, $ifcfgsnv6) = explode("/", $ifnet);
+	if (!is_ipaddrv6($ifcfgipv6)) {
+		/* Handle tracked interface that has no ip */
+		if(isset($config['interfaces'][$dhcpv6if]['track6-interface'])) {
+			$subnetv6 = "::";
+			$ifcfgsnv6 = "64";
+		} else {
+			$subnetv6 = '';
+			$ifcfgsnv6 = '';
+		}
+	} else {
+		$subnetv6 = gen_subnetv6($ifcfgipv6, $ifcfgsnv6);
+	}
+	return array($ifcfgipv6, $subnetv6, $ifcfgsnv6);
+}
+
 /* implement ipv6 route advertising daemon */
+/* blacklist is actually a list of interfaces whose parent tracking interface is down/unavail.  Should be called $track6 or something */
 function services_radvd_configure($blacklist = array()) {
 	global $config, $g;
 	
@@ -74,9 +110,13 @@ function services_radvd_configure($blacklist = array()) {
 		if (!isset($config['interfaces'][$dhcpv6if]['enable']))
 			continue;
 
-		/* Do not put in the config an interface which is down */
-		if (isset($blacklist[$dhcpv6if]))
+		/* Do not put in the config a interface which is down */
+		/*
+		if (isset($blacklist[$dhcpv6if])) {
+			$radvdconf .= "# No config generated for tracked interface {$dhcpv6if}\n";	
 			continue;
+		}
+		*/
 		if (!isset($dhcpv6ifconf['ramode']))
 			$dhcpv6ifconf['ramode'] = $dhcpv6ifconf['mode'];
 
@@ -110,12 +150,15 @@ function services_radvd_configure($blacklist = array()) {
 		if (isset($radvdifs[$realif]))
 			continue;
 
-		$ifcfgipv6 = get_interface_ipv6($dhcpv6if);
-		if (!is_ipaddrv6($ifcfgipv6))
-			continue;
+		/* find first real ip address on interface. ignore link-local and ipalias. may not exist with a tracked interface */
+		list($ifcfgipv6, $subnetv6, $ifcfgsnv6) = services_get_real_ipv6_ip($realif);
+		if (!is_ipaddrv6($ifcfgipv6) && $subnetv6 !== "::" ) {
+			/* If subnets are defined, always apply those */
+			if (!is_array($dhcpv6ifconf['subnets']['item'])) {
+				continue;
+			}
+		}
 
-		$ifcfgsnv6 = get_interface_subnetv6($dhcpv6if);
-		$subnetv6 = gen_subnetv6($ifcfgipv6, $ifcfgsnv6);
 		$radvdifs[$realif] = $realif;
 
 		$radvdconf .= "# Generated for DHCPv6 Server $dhcpv6if\n";
@@ -123,6 +166,7 @@ function services_radvd_configure($blacklist = array()) {
 		if (strstr($realif, "ovpn")) {
 			$radvdconf .= "\tUnicastOnly on;\n";
 		}
+		$radvdconf .= "\tIgnoreIfMissing on;\n";
 		$radvdconf .= "\tAdvSendAdvert on;\n";
 		$radvdconf .= "\tMinRtrAdvInterval 5;\n";
 		$radvdconf .= "\tMaxRtrAdvInterval 20;\n";
@@ -154,46 +198,51 @@ function services_radvd_configure($blacklist = array()) {
 				$radvdconf .= "\tAdvOtherConfigFlag on;\n";
 				break;
 		}
-		$radvdconf .= "\tprefix {$subnetv6}/{$ifcfgsnv6} {\n";
-		if($carpif == true) {
-			$radvdconf .= "\t\tDeprecatePrefix off;\n";
-		} else {
+		if($subnetv6 !== '') {
+			$radvdconf .= "\tprefix {$subnetv6}/{$ifcfgsnv6} {\n";
+			//from 2.3
 			$radvdconf .= "\t\tDeprecatePrefix on;\n";
+			$radvdconf .= "\t\tAdvValidLifetime 86400;\n";
+			$radvdconf .= "\t\tAdvPreferredLifetime 14400;\n";
+			switch($dhcpv6ifconf['ramode']) {
+				case "managed":
+					$radvdconf .= "\t\tAdvOnLink on;\n";
+					$radvdconf .= "\t\tAdvAutonomous off;\n";
+					$radvdconf .= "\t\tAdvRouterAddr on;\n";
+					break;
+				case "router":
+					$radvdconf .= "\t\tAdvOnLink off;\n";
+					$radvdconf .= "\t\tAdvAutonomous off;\n";
+					$radvdconf .= "\t\tAdvRouterAddr on;\n";
+					break;
+				case "stateless_dhcp":
+					$radvdconf .= "\t\tAdvOnLink on;\n";
+					$radvdconf .= "\t\tAdvAutonomous on;\n";
+					$radvdconf .= "\t\tAdvRouterAddr on;\n";
+					break;
+				case "assist":
+					$radvdconf .= "\t\tAdvOnLink on;\n";
+					$radvdconf .= "\t\tAdvAutonomous on;\n";
+					$radvdconf .= "\t\tAdvRouterAddr on;\n";
+					break;
+				case "unmanaged":
+					$radvdconf .= "\t\tAdvOnLink on;\n";
+					$radvdconf .= "\t\tAdvAutonomous on;\n";
+					$radvdconf .= "\t\tAdvRouterAddr on;\n";
+					break;				
+			}
+			$radvdconf .= "\t};\n";
 		}
-		switch($dhcpv6ifconf['ramode']) {
-			case "managed":
-				$radvdconf .= "\t\tAdvOnLink on;\n";
-				$radvdconf .= "\t\tAdvAutonomous off;\n";
-				$radvdconf .= "\t\tAdvRouterAddr on;\n";
-				break;
-			case "router":
-				$radvdconf .= "\t\tAdvOnLink off;\n";
-				$radvdconf .= "\t\tAdvAutonomous off;\n";
-				$radvdconf .= "\t\tAdvRouterAddr on;\n";
-				break;
-			case "stateless_dhcp":
-			case "assist":
-				$radvdconf .= "\t\tAdvOnLink on;\n";
-				$radvdconf .= "\t\tAdvAutonomous on;\n";
-				$radvdconf .= "\t\tAdvRouterAddr on;\n";
-				break;
-			case "unmanaged":
-				$radvdconf .= "\t\tAdvOnLink on;\n";
-				$radvdconf .= "\t\tAdvAutonomous on;\n";
-				$radvdconf .= "\t\tAdvRouterAddr on;\n";
-				break;				
-		}
-		$radvdconf .= "\t};\n";
 
 		if (is_array($dhcpv6ifconf['subnets']['item'])) {
 			foreach ($dhcpv6ifconf['subnets']['item'] as $subnet) {
 				if (is_subnetv6($subnet)) {
 					$radvdconf .= "\tprefix {$subnet} {\n";
-					if($carpif == true) {
-						$radvdconf .= "\t\tDeprecatePrefix off;\n";
-					} else {
-						$radvdconf .= "\t\tDeprecatePrefix on;\n";
-					}
+					//from 2.3
+					$radvdconf .= "\t\tDeprecatePrefix on;\n";
+					$radvdconf .= "\t\tAdvValidLifetime 86400;\n";
+					$radvdconf .= "\t\tAdvPreferredLifetime 14400;\n";
+					/*
 					switch($dhcpv6ifconf['ramode']) {
 						case "managed":
 							$radvdconf .= "\t\tAdvOnLink on;\n";
@@ -216,19 +265,19 @@ function services_radvd_configure($blacklist = array()) {
 							$radvdconf .= "\t\tAdvRouterAddr on;\n";
 							break;				
 					}
+					*/
+					/* case "unmanaged" since theres no dhcp server */
+					$radvdconf .= "\t\tAdvOnLink on;\n";
+					$radvdconf .= "\t\tAdvAutonomous on;\n";
+					$radvdconf .= "\t\tAdvRouterAddr on;\n";
 					$radvdconf .= "\t};\n";
 				}
 			}
 		}
-		if($carpif === true) {
-			$radvdconf .= "\troute ::/0 {\n";
-			$radvdconf .= "\t\tRemoveRoute off;\n";
-			$radvdconf .= "\t};\n";
-		} else {
-			$radvdconf .= "\troute ::/0 {\n";
-			$radvdconf .= "\t\tRemoveRoute on;\n";
-			$radvdconf .= "\t};\n";
-		}
+		//2.3
+		$radvdconf .= "\troute ::/0 {\n";
+		$radvdconf .= "\t\tRemoveRoute on;\n";
+		$radvdconf .= "\t};\n";
 
 		/* add DNS servers */
 		$dnslist = array();
@@ -261,15 +310,21 @@ function services_radvd_configure($blacklist = array()) {
 		$radvdconf .= "};\n";
 	}
 
-	/* handle DHCP-PD prefixes and 6RD dynamic interfaces */
+	/* handle DHCP-PD prefixes and 6RD dynamic interfaces that are not manually configured */
 	foreach ($Iflist as $if => $ifdescr) {
-		if(!isset($config['interfaces'][$if]['track6-interface']))
-			continue;
+		/* https://redmine.pfsense.org/projects/pfsense/repository/revisions/08d3034c5581536ccb9ef472c07dd3d9c0a3747e */
+		if (!isset($config['interfaces'][$if]['track6-interface']) ||
+		    !isset($config['interfaces'][$if]['ipaddrv6']) ||
+		    $config['interfaces'][$if]['ipaddrv6'] != 'track6') {		
+				continue;
+		}
 		if(!isset($config['interfaces'][$if]['enable']))
 			continue;
 		/* Do not put in the config an interface which is down */
-		if (isset($blacklist[$if]))
+		if (isset($blacklist[$if])) {
+			$radvdconf .= "# No config generated for auto tracked interface {$if}\n";	
 			continue;
+		}
 		$trackif = $config['interfaces'][$if]['track6-interface'];
 		if (empty($config['interfaces'][$trackif]))
 			continue;
@@ -364,6 +419,7 @@ function services_radvd_configure($blacklist = array()) {
 	return 0;
 }
 
+/* track6 is array of interfaces where tracked interface is down or unavailable  */
 function services_dhcpd_configure($family = "all", $blacklist = array()) {
 	global $config, $g;
 
@@ -1135,10 +1191,10 @@ function services_dhcpdv6_configure($blacklist = array()) {
 			continue;
 		if (!empty($config['interfaces'][$ifname]['track6-interface']) && (empty($dhcpdv6cfg[$ifname]) || !isset($dhcpdv6cfg[$ifname]['enable']))) {
 			$realif = get_real_interface($ifname, "inet6");
-			$ifcfgipv6 = get_interface_ipv6($ifname);
-			if(!is_ipaddrv6($ifcfgipv6))
+			list($ifcfgipv6, $subnetv6, $ifcfgsnv6) = services_get_real_ipv6_ip($realif);
+			if (!is_ipaddrv6($ifcfgipv6))
 				continue;
-			$ifcfgipv6 = Net_IPv6::getNetmask($ifcfgipv6, 64);
+			$ifcfgipv6 = Net_IPv6::getNetmask($ifcfgipv6, $ifcfgsnv6);
 			$trackifname = $config['interfaces'][$ifname]['track6-interface'];
 			$trackcfg = $config['interfaces'][$trackifname];
 			$pdlen = calculate_ipv6_delegation_length($trackifname);
@@ -1221,9 +1277,12 @@ EOD;
 
 		if (!isset($dhcpv6ifconf['enable']) || !isset($Iflist[$dhcpv6if]) || !isset($ifcfgv6['enable']))
 			continue;
+		list($ifcfgipv6, $subnetv6, $ifcfgsnv6) = services_get_real_ipv6_ip(get_real_interface($dhcpv6if, "inet6"));
+		/*
 		$ifcfgipv6 = get_interface_ipv6($dhcpv6if);
 		$ifcfgsnv6 = get_interface_subnetv6($dhcpv6if);
 		$subnetv6 = gen_subnetv6($ifcfgipv6, $ifcfgsnv6);
+		*/
 
 		if ($is_olsr_enabled == true) {
 			if($dhcpv6ifconf['netmask'])
