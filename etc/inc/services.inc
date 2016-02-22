@@ -121,6 +121,7 @@ function services_radvd_configure($blacklist = array()) {
 		if (strstr($realif, "ovpn")) {
 			$radvdconf .= "\tUnicastOnly on;\n";
 		}
+		$radvdconf .= "\tIgnoreIfMissing on;\n";
 		$radvdconf .= "\tAdvSendAdvert on;\n";
 		$radvdconf .= "\tMinRtrAdvInterval 5;\n";
 		$radvdconf .= "\tMaxRtrAdvInterval 20;\n";
@@ -129,6 +130,9 @@ function services_radvd_configure($blacklist = array()) {
 			$radvdconf .= "\tAdvLinkMTU {$mtu};\n";
 		else
 			$radvdconf .= "\tAdvLinkMTU 1280;\n";
+		if (isset($dhcpv6ifconf['radisabledefaultroute'])) {
+			$radvdconf .= "\tAdvDefaultLifetime 0;\n";
+		}
 
 		switch($dhcpv6ifconf['rapriority']) {
 			case "low":
@@ -218,11 +222,8 @@ function services_radvd_configure($blacklist = array()) {
 				}
 			}
 		}
-		if($carpif === true) {
-			$radvdconf .= "\troute ::/0 {\n";
-			$radvdconf .= "\t\tRemoveRoute off;\n";
-			$radvdconf .= "\t};\n";
-		} else {
+		//2.3
+		if (!isset($dhcpv6ifconf['radisabledefaultroute'])) {
 			$radvdconf .= "\troute ::/0 {\n";
 			$radvdconf .= "\t\tRemoveRoute on;\n";
 			$radvdconf .= "\t};\n";
